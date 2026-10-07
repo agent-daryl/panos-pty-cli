@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+tmp/
+# never let credential material in
+*.key
+*.pem
+*.env
+.env
