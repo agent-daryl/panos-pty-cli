@@ -1,0 +1,14 @@
+# Example command file for panos_pty.py (TEST-NET placeholders -- no real
+# device is addressed by this file).
+#
+# One command per line; blank lines and '#' comments are ignored. All
+# commands run in a single login session.
+#
+#   python3 panos_pty.py --host 192.0.2.10 --user admin \
+#     --password-env PANOS_PASSWORD --prompt-regex 'admin@my-fw' \
+#     --file examples/commands.example.txt
+
+show system info
+show system resources
+show interface ethernet1/1
+show config running
