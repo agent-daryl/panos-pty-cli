@@ -143,6 +143,12 @@ def api_call(base, params, key, verify, timeout, key_in_header=True):
         return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError) as e:
+        # unreachable host, TLS failure, timeout -- report as a structured
+        # error so callers (e.g. the panos.sh wrapper) can fall back cleanly
+        return 0, ("<response status='error' code='0'>"
+                   "<result><msg>network error: %s</msg></result>"
+                   "</response>" % e)
 
 
 def emit(body, out_path, what):

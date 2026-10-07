@@ -1,7 +1,8 @@
 # panos-pty-cli
 
-Two small, stdlib-only Python tools for talking to Palo Alto Networks
-firewalls (PAN-OS) from a Linux box:
+Two small, stdlib-only Python tools — plus a one-line front end that ties
+them together — for talking to Palo Alto Networks firewalls (PAN-OS) from a
+Linux box:
 
 - **`panos_pty.py`** — a pty-based CLI driver. Feeds CLI commands to the
   firewall's ssh console and reliably captures the output, even from a slow,
@@ -9,6 +10,9 @@ firewalls (PAN-OS) from a Linux box:
 - **`panos_api.py`** — a minimal PAN-OS XML API client (`keygen`, op reads,
   running-config dump) that encodes the 10.x API quirks that cost real
   debugging time.
+- **`panos.sh`** — an API-first, pty-fallback front end that ties the two
+  together: try the XML API, fall back to the ssh console when it can't
+  serve the command. See [Order of operation](#order-of-operation-panossh-api-first-pty-fallback).
 
 Python 3.8+, standard library only. No `expect`, no `paramiko`, no
 `sshpass`.
@@ -34,6 +38,47 @@ The only reliable completion signal on such a device is: *the device stopped
 talking, and it is asking for input again.* Both tools below are built
 around that.
 
+## Credentials & endpoints
+
+**Where the tools look for the firewall and for credentials:**
+
+| What | How to give it |
+|---|---|
+| Management IP/hostname | `--host` on every tool (e.g. `192.0.2.10`) |
+| API endpoint | `https://<host>:<port>` — https only; `--port` on `panos_api.py` / `panos.sh` (default 443) |
+| SSH endpoint | `<host>:<port>` — `--ssh-port` on `panos_pty.py` / `panos.sh` (default 22) |
+| API key | `--key-file FILE`, or `--key-env NAME`, or the `PANOS_API_KEY` env var |
+| Login password | an env var named by `--password-env` (default `PANOS_PASSWORD`); never on the command line |
+
+**Storing the password** — in a 0600 file, loaded inline so it never lands
+in shell history:
+
+```
+umask 077
+printf '%s' '<the-password>' > ~/.panos_pw     # create once
+```
+
+```
+PANOS_PASSWORD="$(cat ~/.panos_pw)" python3 panos_pty.py --host 192.0.2.10 ...
+```
+
+Do **not** do `export PANOS_PASSWORD='<the-password>'` in an interactive
+shell — the literal ends up in shell history. (A command substitution like
+`"$(cat ~/.panos_pw)"` is safe: history records the command, not its output.)
+A secrets-manager env var works the same way.
+
+**Storing the API key** — `keygen --key-out` writes it to a mode-0600 file
+automatically:
+
+```
+python3 panos_api.py keygen --host 192.0.2.10 --user admin \
+    --password-env PANOS_PASSWORD --key-out ~/.panos_api_key
+```
+
+or keep it in an env var: `export PANOS_API_KEY="$(cat ~/.panos_api_key)"`.
+The key is transmitted in the `X-PAN-KEY` header by default so it does not
+land in URLs or access logs.
+
 ### The three reusable insights
 
 1. **The two-condition completion rule.** A command is done only when BOTH
@@ -52,7 +97,7 @@ around that.
 ## `panos_pty.py` — the pty CLI driver
 
 ```
-export PANOS_PASSWORD='...'          # the password lives only in the env
+PANOS_PASSWORD="$(cat ~/.panos_pw)"     # load from a 0600 file (see above)
 printf 'show system info\nshow config running\n' |
   python3 panos_pty.py \
     --host 192.0.2.10 --user admin \
@@ -80,6 +125,7 @@ Key options (see `--help` for the full list):
 | `--stable` | `0` | extra seconds the bare prompt must survive after first detection — raise this for devices that pause > `--idle-done` *mid-output* |
 | `--window` | `3000x400` | pty rows×cols (paging suppression) |
 | `--page-markers` | `--More-- (press RETURN) lines 1-` | paging footer strings |
+| `--ssh-port` | `22` | ssh port on the firewall |
 | `--ssh-extra-args` | — | e.g. `-J bastion` |
 | `--use-ssh-config` | off | by default ssh gets `-F /dev/null` (deterministic; also required on hosts whose `/etc/ssh/ssh_config.d` includes have bad ownership) |
 | `--exec-cmd` | — | testing/escape hatch: replace the ssh invocation with an arbitrary command (used by the test suite) |
@@ -146,6 +192,42 @@ the hard way:
 (`show system info` → `<show><system><info/></system></show>`); commands
 needing attributes must be written as raw XML for the `op` subcommand.
 
+## Order of operation: `panos.sh` (API-first, pty-fallback)
+
+`panos.sh` is the front end you normally run. It takes one or more CLI
+commands and applies this policy, per command:
+
+1. **Try the XML API first** — but only when an API key is available AND the
+   command is a *simple read*: first token `show`, at least two tokens, every
+   token a bare element name (so `show system info` qualifies, while
+   `show interface ethernet1/1` — the slash — does not).
+2. **Fall back to the pty driver** when the API is unreachable, refuses the
+   key, or rejects the command (any non-zero exit from `panos_api.py`).
+   Non-simple-read commands (configure/set/commit, slashed names, ...) skip
+   the API entirely and go straight to the pty queue.
+3. **Batch the pty work**: after the API pass, all queued commands run in
+   ONE pty session — one login, not one per command.
+
+Data goes to **stdout** (API XML responses and/or pty `===== CMD: ... =====`
+blocks — the format depends on which path ran); status lines go to
+**stderr** so stdout stays parseable:
+
+```
+panos.sh: 'show system info' -> API
+panos.sh: 'show config running' -> API failed, queuing for pty
+```
+
+```
+PANOS_PASSWORD="$(cat ~/.panos_pw)" \
+  ./panos.sh --host 192.0.2.10 --user admin \
+      --key-file ~/.panos_api_key --prompt-regex 'admin@my-fw' \
+      'show system info' 'show config running'
+```
+
+The password is only needed if the pty path actually runs (exit 4 with a
+clear message otherwise). The wrapper never passes `--allow-write`: writes
+are not an API-first concern — use the tools directly for those.
+
 ## Testing
 
 The test suite runs the **real driver as a subprocess** against
@@ -158,7 +240,13 @@ No network, no real device, stdlib only.
 ```
 python3 -m unittest -v tests.test_panos_pty   # 10 tests, ~50 s
 python3 -m unittest -v tests.test_panos_api   # 19 fast unit tests
+python3 -m unittest -v tests.test_panos_sh    # 6 wrapper tests (needs openssl)
 ```
+
+The wrapper tests run `panos.sh` against a local TLS stub of the PAN-OS API
+(ephemeral 127.0.0.1 port, self-signed cert) plus the fake appliance, so
+API success, API-reject fallback, no-key, mixed, and single-session-batching
+behaviour are all covered without a network or a real device.
 
 ## Security notes
 

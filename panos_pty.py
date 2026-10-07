@@ -173,6 +173,8 @@ def parse_args(argv=None):
     p.add_argument("--window", default="3000x400",
                    help="pty window ROWSxCOLS (default 3000x400 -- a 'screen' "
                         "so large the pager almost never engages)")
+    p.add_argument("--ssh-port", type=int, default=22,
+                   help="ssh port (default 22)")
     p.add_argument("--ssh-binary", default="ssh", help="ssh executable (default ssh)")
     p.add_argument("--known-hosts",
                    default=os.path.expanduser("~/.panos_pty_kh"),
@@ -213,7 +215,8 @@ def build_transport(args):
     cmd += ["-o", "StrictHostKeyChecking=accept-new",
             "-o", "UserKnownHostsFile=%s" % args.known_hosts,
             "-o", "NumberOfPasswordPrompts=1",
-            "-o", "ConnectTimeout=%d" % args.connect_timeout]
+            "-o", "ConnectTimeout=%d" % args.connect_timeout,
+            "-p", str(args.ssh_port)]
     if args.ssh_extra_args:
         cmd += shlex.split(args.ssh_extra_args)
     cmd += ["%s@%s" % (args.user, args.host)]
